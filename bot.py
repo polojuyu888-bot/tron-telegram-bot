@@ -31,7 +31,6 @@ TRONGRID_API_KEY = ""
 
 # Lấy PORT do Render tự động cấp
 PORT = int(os.environ.get("PORT", 10000))
-# Điền domain Render của bạn vào đây sau khi tạo Web Service (Ví dụ: https://ten-bot-cua-ban.onrender.com)
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 
@@ -426,9 +425,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------
-# KHỞI CHẠY WEBHOOK SERVER TRÊN RENDER
+# KHỞI CHẠY WEBHOOK SERVER TRÊN RENDER (CHUẨN LIFECYCLE)
 # -------------------------------------------------------------
-async def run_bot():
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("all", all_command))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
@@ -436,44 +435,43 @@ async def run_bot():
     if app.job_queue:
         app.job_queue.run_repeating(monitor_wallets_task, interval=30, first=1)
 
-    await app.initialize()
-    if app.job_queue: await app.job_queue.start()
-    await app.start()
+    async with app:
+        await app.start()
 
-    # Thiết lập Webhook tự động nếu có URL của Render
-    if RENDER_EXTERNAL_URL:
-        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{BOT_TOKEN}"
-        await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-        print(f"🚀 Đã thiết lập Webhook: {webhook_url}")
+        if RENDER_EXTERNAL_URL:
+            webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{BOT_TOKEN}"
+            await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            print(f"🚀 Đã thiết lập Webhook: {webhook_url}")
 
-    # Tạo aiohttp web server giữ cổng cho Render
-    web_app = web.Application()
-    web_app.router.add_get("/", lambda req: web.Response(text="Bot is running!", status=200))
+        web_app = web.Application()
+        web_app.router.add_get("/", lambda req: web.Response(text="Bot is running!", status=200))
 
-    async def webhook_handler(request):
+        async def webhook_handler(request):
+            try:
+                data = await request.json()
+                update = Update.de_json(data, app.bot)
+                await app.process_update(update)
+                return web.Response(status=200)
+            except Exception as e:
+                print(f"Lỗi webhook: {e}")
+                return web.Response(status=500)
+
+        web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
+
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        print(f"🌐 Web server đang chạy tại port {PORT}")
+
         try:
-            data = await request.json()
-            update = Update.de_json(data, app.bot)
-            await app.process_update(update)
-            return web.Response(status=200)
-        except Exception as e:
-            print(f"Lỗi webhook: {e}")
-            return web.Response(status=500)
+            await asyncio.Event().wait()
+        finally:
+            await runner.cleanup()
+            await app.stop()
 
-    web_app.router.add_post(f"/{BOT_TOKEN}", webhook_handler)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"🌐 Web server đang chạy tại port {PORT}")
-
+if __name__ == "__main__":
     try:
-        while True: await asyncio.sleep(3600)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        if app.job_queue: await app.job_queue.stop()
-        await app.bot.delete_webhook()
-        await app.stop()
-        await app.shutdown()
-
-asyncio.run(run_bot())
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("🛑 Đã dừng Bot an toàn.")
